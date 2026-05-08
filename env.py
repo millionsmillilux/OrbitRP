@@ -56,7 +56,7 @@ class OrbitEnv:
         if actions is None:
             actions = [[] for _ in range(self.num_agents)]
 
-        # HARD FIX: ensure structure
+        # Normalize malformed action batches to no-ops.
         if not isinstance(actions, list) or len(actions) != self.num_agents:
             actions = [[] for _ in range(self.num_agents)]
 
@@ -88,7 +88,7 @@ class OrbitEnv:
                 src = int(src)
                 angle = float(angle)
                 ships = float(ships)
-            except:
+            except (TypeError, ValueError):
                 continue
 
             if src < 0 or src >= len(self.planets):
