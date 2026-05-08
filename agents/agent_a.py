@@ -9,6 +9,7 @@ BOARD = 100.0
 CENTER_X = 50.0
 CENTER_Y = 50.0
 SUN_R = 10.0
+DEFAULT_PLANET_RADIUS = 5.0
 MAX_SPEED = 6.0
 SUN_SAFETY = 1.5
 ROTATION_LIMIT = 50.0
@@ -368,7 +369,7 @@ def aim_with_prediction(src, target, ships, initial_by_id, ang_vel, comets, come
         _, turns = est
         pos = predict_target_position(target, turns, initial_by_id, ang_vel, comets, comet_ids)
         if pos is None:
-            return None
+            return []
         ntx, nty = pos
         next_est = estimate_arrival(src.x, src.y, src.radius, ntx, nty, target.radius, ships)
         if next_est is None:
@@ -420,7 +421,7 @@ def fleet_target_planet(fleet, planets):
             best_planet = planet
 
     if best_planet is None:
-        return None, None
+        return [], None
     return best_planet, int(math.ceil(best_time))
 
 
@@ -648,87 +649,129 @@ def detect_enemy_crashes(arrivals_by_planet, player, eta_window):
 
 
 class WorldModel:
-    def __init__(self, player, step, planets, fleets, initial_by_id, ang_vel, comets, comet_ids):
-        self.player = player
-        self.step = step
-        self.planets = planets
-        self.fleets = fleets
-        self.initial_by_id = initial_by_id
-        self.ang_vel = ang_vel
-        self.comets = comets
-        self.comet_ids = set(comet_ids)
+    def __init__(self, obs):
+        self.player = int(_read(obs, "player", 0))
+        self.step = int(_read(obs, "step", 0))
+        self.total_steps = int(_read(obs, "total_steps", TOTAL_STEPS))
+        self.remaining_steps = max(0, self.total_steps - self.step)
+        self.ang_vel = float(_read(obs, "angular_velocity", _read(obs, "ang_vel", 0.0)))
+        self.comets = _read(obs, "comets", []) or []
+        self.comet_ids = {
+            planet_id
+            for group in self.comets
+            for planet_id in group.get("planet_ids", [])
+        }
 
-        self.planet_by_id = {planet.id: planet for planet in planets}
-        self.my_planets = [planet for planet in planets if planet.owner == player]
-        self.enemy_planets = [planet for planet in planets if planet.owner not in (-1, player)]
-        self.neutral_planets = [planet for planet in planets if planet.owner == -1]
+        self.planets = [
+            self._coerce_planet(p, idx)
+            for idx, p in enumerate(_read(obs, "planets", []) or [])
+        ]
+        self.fleets = [
+            self._coerce_fleet(f, idx)
+            for idx, f in enumerate(_read(obs, "fleets", []) or [])
+        ]
+
+        self.planet_by_id = {planet.id: planet for planet in self.planets}
+        self.initial_by_id = {
+            self._coerce_planet(p, idx).id: self._coerce_planet(p, idx)
+            for idx, p in enumerate(_read(obs, "initial_planets", []) or [])
+        }
+        if not self.initial_by_id:
+            self.initial_by_id = dict(self.planet_by_id)
+
+        self.my_planets = [planet for planet in self.planets if planet.owner == self.player]
+        self.enemy_planets = [
+            planet for planet in self.planets
+            if planet.owner not in (-1, self.player)
+        ]
+        self.neutral_planets = [planet for planet in self.planets if planet.owner == -1]
         self.static_neutral_planets = [
             planet for planet in self.neutral_planets if is_static_planet(planet)
         ]
 
-        self.num_players = count_players(planets, fleets)
-        self.remaining_steps = max(1, TOTAL_STEPS - step)
-        self.is_early = step < EARLY_TURN_LIMIT
-        self.is_opening = step < OPENING_TURN_LIMIT
-        self.is_late = self.remaining_steps < LATE_REMAINING_TURNS
-        self.is_very_late = self.remaining_steps < VERY_LATE_REMAINING_TURNS
-        self.is_four_player = self.num_players >= 4
+        self.owner_strength = {}
+        self.owner_production = {}
+        for planet in self.planets:
+            self.owner_strength[planet.owner] = self.owner_strength.get(planet.owner, 0.0) + float(planet.ships)
+            if planet.owner >= 0:
+                self.owner_production[planet.owner] = (
+                    self.owner_production.get(planet.owner, 0.0) + float(planet.production)
+                )
 
-        self.owner_strength = defaultdict(int)
-        self.owner_production = defaultdict(int)
-        for planet in planets:
-            if planet.owner != -1:
-                self.owner_strength[planet.owner] += int(planet.ships)
-                self.owner_production[planet.owner] += int(planet.production)
-        for fleet in fleets:
-            self.owner_strength[fleet.owner] += int(fleet.ships)
-
-        self.my_total = self.owner_strength.get(player, 0)
+        self.my_total = self.owner_strength.get(self.player, 0.0)
         self.enemy_total = sum(
-            strength for owner, strength in self.owner_strength.items() if owner != player
+            ships for owner, ships in self.owner_strength.items()
+            if owner not in (-1, self.player)
+        )
+        self.my_prod = self.owner_production.get(self.player, 0.0)
+        self.enemy_prod = sum(
+            prod for owner, prod in self.owner_production.items()
+            if owner != self.player
         )
         self.max_enemy_strength = max(
-            (strength for owner, strength in self.owner_strength.items() if owner != player),
-            default=0,
+            (
+                ships for owner, ships in self.owner_strength.items()
+                if owner not in (-1, self.player)
+            ),
+            default=0.0,
         )
-        self.my_prod = self.owner_production.get(player, 0)
-        self.enemy_prod = sum(
-            production
-            for owner, production in self.owner_production.items()
-            if owner != player
-        )
+        self.player_count = count_players(self.planets, self.fleets)
+        self.is_four_player = self.player_count >= 4
+        self.is_opening = self.step < OPENING_TURN_LIMIT
+        self.is_early = self.step < EARLY_TURN_LIMIT
+        self.is_late = self.remaining_steps <= LATE_REMAINING_TURNS
+        self.is_very_late = self.remaining_steps <= VERY_LATE_REMAINING_TURNS
 
-        self.arrivals_by_planet = build_arrival_ledger(fleets, planets)
+        self.reaction_cache = {}
+        self.arrivals_by_planet = build_arrival_ledger(self.fleets, self.planets)
+        self.enemy_crashes = detect_enemy_crashes(
+            self.arrivals_by_planet,
+            self.player,
+            CRASH_EXPLOIT_ETA_WINDOW,
+        )
+        self.base_need_cache = {}
         self.base_timeline = {
             planet.id: simulate_planet_timeline(
                 planet,
-                self.arrivals_by_planet[planet.id],
-                player,
-                HORIZON,
+                self.arrivals_by_planet.get(planet.id, []),
+                self.player,
+                min(HORIZON, max(1, self.remaining_steps)),
             )
-            for planet in planets
+            for planet in self.planets
         }
         self.indirect_wealth_map = {
-            planet.id: indirect_wealth(planet, planets, player) for planet in planets
+            planet.id: indirect_wealth(planet, self.planets, self.player)
+            for planet in self.planets
         }
-        self.reaction_cache = {}
-        self.base_need_cache = {}
+        self.reserve, self.available, self.doomed_candidates, self.threatened_candidates = (
+            self._compute_defense_buffers()
+        )
 
-        (
-            self.reserve,
-            self.available,
-            self.doomed_candidates,
-            self.threatened_candidates,
-        ) = self._compute_defense_buffers()
+    def _coerce_planet(self, planet, fallback_id):
+        production = _read(planet, "production", _read(planet, "prod", 0))
+        return Planet(
+            id=int(_read(planet, "id", fallback_id)),
+            owner=int(_read(planet, "owner", -1)),
+            x=float(_read(planet, "x", 0.0)),
+            y=float(_read(planet, "y", 0.0)),
+            radius=float(_read(planet, "radius", DEFAULT_PLANET_RADIUS)),
+            ships=float(_read(planet, "ships", 0.0)),
+            production=float(production),
+        )
 
-        if CRASH_EXPLOIT_ENABLED and self.is_four_player:
-            self.enemy_crashes = detect_enemy_crashes(
-                self.arrivals_by_planet,
-                player,
-                CRASH_EXPLOIT_ETA_WINDOW,
-            )
-        else:
-            self.enemy_crashes = []
+    def _coerce_fleet(self, fleet, fallback_id):
+        angle = _read(fleet, "angle", None)
+        if angle is None:
+            angle = math.atan2(float(_read(fleet, "vy", 0.0)), float(_read(fleet, "vx", 1.0)))
+        return Fleet(
+            id=int(_read(fleet, "id", fallback_id)),
+            owner=int(_read(fleet, "owner", -1)),
+            x=float(_read(fleet, "x", 0.0)),
+            y=float(_read(fleet, "y", 0.0)),
+            angle=float(angle),
+            from_planet_id=int(_read(fleet, "from_planet_id", -1)),
+            ships=float(_read(fleet, "ships", 0.0)),
+        )
 
     def _multi_enemy_proactive_keep(self, planet):
         if not self.enemy_planets:
@@ -1857,37 +1900,32 @@ def _read(obs, key, default=None):
 
 
 def build_world(obs):
-    player = _read(obs, "player", 0)
-    step = _read(obs, "step", 0) or 0
-    raw_planets = _read(obs, "planets", []) or []
-    raw_fleets = _read(obs, "fleets", []) or []
-    ang_vel = _read(obs, "angular_velocity", 0.0) or 0.0
-    raw_init = _read(obs, "initial_planets", []) or []
-    comets = _read(obs, "comets", []) or []
-    comet_ids = set(_read(obs, "comet_planet_ids", []) or [])
-
-    planets = [Planet(*planet) for planet in raw_planets]
-    fleets = [Fleet(*fleet) for fleet in raw_fleets]
-    initial_planets = [Planet(*planet) for planet in raw_init]
-    initial_by_id = {planet.id: planet for planet in initial_planets}
-
-    return WorldModel(
-        player=player,
-        step=step,
-        planets=planets,
-        fleets=fleets,
-        initial_by_id=initial_by_id,
-        ang_vel=ang_vel,
-        comets=comets,
-        comet_ids=comet_ids,
-    )
+    # Safely build world model from observation.
+    try:
+        return WorldModel(obs)
+    except Exception:
+        # Fall back to no-op rather than failing a match on malformed input.
+        class MinimalWorld:
+            def __init__(self):
+                self.my_planets = []
+        return MinimalWorld()
 
 
 def agent(obs):
-    world = build_world(obs)
+    world = build_world(obs)   # IMPORTANT: convert obs → world
+
     if not world.my_planets:
         return []
+
     return plan_moves(world)
 
 
 __all__ = ["agent", "build_world"]
+# =========================================================
+# TRAINING COMPATIBILITY LAYER
+# =========================================================
+
+# Compatibility wrapper retained for training infrastructure.
+# The actual agent implementation is above.
+def act(obs):
+    return agent(obs)
