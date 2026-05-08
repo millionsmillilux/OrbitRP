@@ -25,7 +25,7 @@ class ModelConfig:
 class PPOConfig:
     rollout_steps: int = 64
     num_envs: int = 4
-    total_updates: int = 2000
+    total_updates: int = 2000 #####
     epochs: int = 4
     minibatch_size: int = 256
     gamma: float = 0.99

@@ -19,7 +19,7 @@
   "ppo": {
     "rollout_steps": 64,
     "num_envs": 4,
-    "total_updates": 2000,
+    "total_updates": 3000,
     "epochs": 4,
     "minibatch_size": 256,
     "gamma": 0.99,

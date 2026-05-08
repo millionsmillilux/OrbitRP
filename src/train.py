@@ -18,6 +18,7 @@ from .ppo import TransitionBatch, ppo_update, sample_actions
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(default_train_config_path()))
+    parser.add_argument("--resume", action="store_true", help="Resume training from last checkpoint")
     return parser.parse_args()
 
 
@@ -152,14 +153,30 @@ def main() -> None:
     envs = [LocalOrbitEnv(cfg, opponent, env_index=i) for i in range(cfg.ppo.num_envs)]
     batches = [env.reset() for env in envs]
     save_dir = Path(cfg.save_dir)
-    
+
+    # Resume from checkpoint if requested
+    start_update = 1
+    if args.resume:
+        checkpoint_path = save_dir / cfg.run_name / "ckpt_last.pt"
+        if checkpoint_path.exists():
+            print(f"Resuming from checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            policy.load_state_dict(checkpoint["policy"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            start_update = checkpoint["update"] + 1
+            print(f"Resumed from update {checkpoint['update']}, continuing from update {start_update}")
+        else:
+            print(f"No checkpoint found at {checkpoint_path}, starting from scratch")
+
     # Ensure policy is in training mode
     policy.train()
-    
+
     print(f"Starting training: {cfg.ppo.total_updates} updates with {cfg.ppo.num_envs} envs")
     print(f"Device: {device}, Opponent: {cfg.opponent}")
+    if start_update > 1:
+        print(f"Continuing from update {start_update}/{cfg.ppo.total_updates}")
 
-    for update in range(1, cfg.ppo.total_updates + 1):
+    for update in range(start_update, cfg.ppo.total_updates + 1):
         batch, batches, stats = collect_rollout(envs, batches, policy, cfg, device)
         metrics = ppo_update(
             policy,
@@ -183,7 +200,7 @@ def main() -> None:
             )
         if update % cfg.checkpoint_every == 0 or update == cfg.ppo.total_updates:
             save_checkpoint(save_dir, cfg.run_name, update, policy, optimizer, cfg)
-    
+
     print(f"Training complete! Model saved to {save_dir / cfg.run_name}")
 
 
