@@ -152,6 +152,12 @@ def main() -> None:
     envs = [LocalOrbitEnv(cfg, opponent, env_index=i) for i in range(cfg.ppo.num_envs)]
     batches = [env.reset() for env in envs]
     save_dir = Path(cfg.save_dir)
+    
+    # Ensure policy is in training mode
+    policy.train()
+    
+    print(f"Starting training: {cfg.ppo.total_updates} updates with {cfg.ppo.num_envs} envs")
+    print(f"Device: {device}, Opponent: {cfg.opponent}")
 
     for update in range(1, cfg.ppo.total_updates + 1):
         batch, batches, stats = collect_rollout(envs, batches, policy, cfg, device)
@@ -171,12 +177,14 @@ def main() -> None:
             opponent.sync_from(policy)
         if update % cfg.log_every == 0:
             print(
-                f"update={update} reward_mean={stats['episode_reward_mean']:.2f} "
+                f"update={update}/{cfg.ppo.total_updates} reward_mean={stats['episode_reward_mean']:.2f} "
                 f"episodes={stats['episodes_finished']} samples={stats['samples']} "
                 f"loss={metrics['loss']:.4f} entropy={metrics['entropy']:.4f}"
             )
         if update % cfg.checkpoint_every == 0 or update == cfg.ppo.total_updates:
             save_checkpoint(save_dir, cfg.run_name, update, policy, optimizer, cfg)
+    
+    print(f"Training complete! Model saved to {save_dir / cfg.run_name}")
 
 
 if __name__ == "__main__":
