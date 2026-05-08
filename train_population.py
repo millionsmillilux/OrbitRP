@@ -1,4 +1,4 @@
-from self_play_train import main
+from src.train import main
 
 
 if __name__ == "__main__":

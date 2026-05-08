@@ -6,3 +6,5 @@ __pycache__/
 venv/
 models/*.zip
 model/*.zip
+models/best_params.json
+models/rl/
