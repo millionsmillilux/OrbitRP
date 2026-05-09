@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
 
+from .constants import SHIP_BUCKET_COUNT
+from .actions import SampledAction
 
-@dataclass(slots=True)
+
 class PolicyOutput:
-    target_logits: torch.Tensor
-    value: torch.Tensor
+    def __init__(self, target_logits: torch.Tensor, ship_logits: torch.Tensor, value: torch.Tensor):
+        self.target_logits = target_logits
+        self.ship_logits = ship_logits
+        self.value = value
 
 
 class PlanetPolicy(nn.Module):
@@ -19,13 +21,20 @@ class PlanetPolicy(nn.Module):
         self.self_encoder = _mlp(self_dim, hidden_size)
         self.candidate_encoder = _mlp(candidate_dim, hidden_size)
         self.global_encoder = _mlp(global_dim, hidden_size)
+
+        combined_dim = hidden_size * 3
         self.target_head = nn.Sequential(
-            nn.Linear(hidden_size * 3, hidden_size),
+            nn.Linear(combined_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, 1),
         )
+        self.ship_head = nn.Sequential(
+            nn.Linear(combined_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, SHIP_BUCKET_COUNT),
+        )
         self.value_head = nn.Sequential(
-            nn.Linear(hidden_size * 3, hidden_size),
+            nn.Linear(combined_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, 1),
         )
@@ -44,12 +53,16 @@ class PlanetPolicy(nn.Module):
         expanded_self = self_h.unsqueeze(1).expand(-1, self.candidate_count, -1)
         expanded_global = global_h.unsqueeze(1).expand(-1, self.candidate_count, -1)
         joint = torch.cat([expanded_self, expanded_global, candidate_h], dim=-1)
-        logits = self.target_head(joint).squeeze(-1)
-        logits = logits.masked_fill(~candidate_mask.bool(), torch.finfo(logits.dtype).min)
 
-        pooled = candidate_h.mean(dim=1)
-        value = self.value_head(torch.cat([self_h, global_h, pooled], dim=-1)).squeeze(-1)
-        return PolicyOutput(target_logits=logits, value=value)
+        target_logits = self.target_head(joint).squeeze(-1)
+        target_logits = target_logits.masked_fill(~candidate_mask.bool(), torch.finfo(target_logits.dtype).min)
+
+        pooled_candidates = candidate_h.mean(dim=1)
+        ship_input = torch.cat([self_h, global_h, pooled_candidates], dim=-1)
+        ship_logits = self.ship_head(ship_input)
+
+        value = self.value_head(torch.cat([self_h, global_h, pooled_candidates], dim=-1)).squeeze(-1)
+        return PolicyOutput(target_logits=target_logits, ship_logits=ship_logits, value=value)
 
 
 def _mlp(input_dim: int, hidden_size: int) -> nn.Sequential:

@@ -1,0 +1,39 @@
+seed: 42
+run_name: orbit_wars_ppo
+device: auto
+save_dir: artifacts
+checkpoint_every: 100
+log_every: 1
+opponent: self
+opponent_pool_size: 10
+self_play_update_interval: 25
+self_play_deterministic: false
+alternate_player_sides: true
+eval_every: 500
+eval_episodes: 5
+best_sync_interval: 1000
+env:
+  board_size: 100.0
+  episode_steps: 200
+  candidate_count: 8
+  max_planets: 16
+  max_ships: 500.0
+  max_production: 5.0
+model:
+  hidden_size: 128
+ppo:
+  rollout_steps: 64
+  num_envs: 4
+  total_updates: 100000
+  epochs: 4
+  minibatch_size: 256
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  ent_coef: 0.01
+  ent_coef_min: 0.001
+  vf_coef: 0.5
+  lr: 0.0003
+  lr_decay: true
+  max_grad_norm: 0.5
+  normalize_rewards: true

@@ -1,39 +1,50 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 from torch.distributions import Categorical
 
-from .policy import PolicyOutput
+from src.shared.actions import SampledAction
+from src.shared.policy import PolicyOutput
 
 
-@dataclass(slots=True)
-class SampledAction:
-    target_index: torch.Tensor
-    log_prob: torch.Tensor
-    entropy: torch.Tensor
-
-
-@dataclass(slots=True)
 class TransitionBatch:
-    self_features: torch.Tensor
-    candidate_features: torch.Tensor
-    global_features: torch.Tensor
-    candidate_mask: torch.Tensor
-    target_index: torch.Tensor
-    log_prob: torch.Tensor
-    returns: torch.Tensor
-    advantages: torch.Tensor
+    def __init__(
+        self,
+        self_features: torch.Tensor,
+        candidate_features: torch.Tensor,
+        global_features: torch.Tensor,
+        candidate_mask: torch.Tensor,
+        target_index: torch.Tensor,
+        ship_index: torch.Tensor,
+        log_prob: torch.Tensor,
+        returns: torch.Tensor,
+        advantages: torch.Tensor,
+    ):
+        self.self_features = self_features
+        self.candidate_features = candidate_features
+        self.global_features = global_features
+        self.candidate_mask = candidate_mask
+        self.target_index = target_index
+        self.ship_index = ship_index
+        self.log_prob = log_prob
+        self.returns = returns
+        self.advantages = advantages
 
 
 def sample_actions(outputs: PolicyOutput, deterministic: bool = False) -> SampledAction:
-    logits = outputs.target_logits
-    dist = Categorical(logits=logits)
-    target_index = logits.argmax(dim=-1) if deterministic else dist.sample()
-    log_prob = dist.log_prob(target_index)
-    entropy = dist.entropy()
-    return SampledAction(target_index=target_index, log_prob=log_prob, entropy=entropy)
+    target_dist = Categorical(logits=outputs.target_logits)
+    ship_dist = Categorical(logits=outputs.ship_logits)
+
+    if deterministic:
+        target_index = outputs.target_logits.argmax(dim=-1)
+        ship_index = outputs.ship_logits.argmax(dim=-1)
+    else:
+        target_index = target_dist.sample()
+        ship_index = ship_dist.sample()
+
+    log_prob = target_dist.log_prob(target_index) + ship_dist.log_prob(ship_index)
+    entropy = target_dist.entropy() + ship_dist.entropy()
+    return SampledAction(target_index=target_index, ship_index=ship_index, log_prob=log_prob, entropy=entropy)
 
 
 def ppo_update(
@@ -58,6 +69,7 @@ def ppo_update(
     global_features = batch.global_features.to(device)
     candidate_mask = batch.candidate_mask.to(device).bool()
     target_index = batch.target_index.to(device)
+    ship_index = batch.ship_index.to(device)
     old_log_prob = batch.log_prob.to(device)
     returns = batch.returns.to(device)
     advantages = batch.advantages.to(device)
@@ -70,16 +82,17 @@ def ppo_update(
     for _ in range(epochs):
         order = torch.randperm(size, device=device)
         for start in range(0, size, minibatch_size):
-            idx = order[start:start + minibatch_size]
+            idx = order[start : start + minibatch_size]
             outputs = policy(
                 self_features[idx],
                 candidate_features[idx],
                 global_features[idx],
                 candidate_mask[idx],
             )
-            dist = Categorical(logits=outputs.target_logits)
-            new_log_prob = dist.log_prob(target_index[idx])
-            entropy = dist.entropy().mean()
+            target_dist = Categorical(logits=outputs.target_logits)
+            ship_dist = Categorical(logits=outputs.ship_logits)
+            new_log_prob = target_dist.log_prob(target_index[idx]) + ship_dist.log_prob(ship_index[idx])
+            entropy = (target_dist.entropy() + ship_dist.entropy()).mean()
             ratio = (new_log_prob - old_log_prob[idx]).exp()
             policy_loss = torch.maximum(
                 -advantages[idx] * ratio,
@@ -100,3 +113,20 @@ def ppo_update(
             update_count += 1
 
     return {key: value / max(1, update_count) for key, value in metrics.items()}
+
+
+def discounted_returns(rewards: list[float], dones: list[bool], values: list[float], gamma: float, gae_lambda: float):
+    returns = [0.0 for _ in rewards]
+    advantages = [0.0 for _ in rewards]
+    next_value = 0.0
+    next_advantage = 0.0
+
+    for idx in reversed(range(len(rewards))):
+        mask = 0.0 if dones[idx] else 1.0
+        delta = rewards[idx] + gamma * next_value * mask - values[idx]
+        advantages[idx] = delta + gamma * gae_lambda * next_advantage * mask
+        returns[idx] = advantages[idx] + values[idx]
+        next_value = values[idx]
+        next_advantage = advantages[idx]
+
+    return returns, advantages

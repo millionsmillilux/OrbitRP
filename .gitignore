@@ -4,7 +4,5 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 venv/
-models/*.zip
-model/*.zip
-models/best_params.json
-models/rl/
+models/
+artifacts/

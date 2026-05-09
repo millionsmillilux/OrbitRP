@@ -1,2 +1,0 @@
-def agent(obs):
-    return []
